@@ -1,0 +1,50 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: seatapp
+      POSTGRES_PASSWORD: seatapp
+      POSTGRES_DB: seats
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seatapp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # Local-only — in production (Render), Neon provides PgBouncer natively,
+  # so the app only runs its own PgBouncer here, for dev/clean-checkout
+  # parity with the pooling behavior the code is written against
+  # (see ARCHITECTURE.md §6 and the PgBouncer gotchas it documents).
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    environment:
+      DATABASE_URL: postgres://seatapp:seatapp@postgres:5432/seats
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 1000
+      DEFAULT_POOL_SIZE: 15
+      AUTH_TYPE: trust
+    ports:
+      - "6432:5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://seatapp:seatapp@pgbouncer:5432/seats
+    ports:
+      - "2000:2000"
+    depends_on:
+      - pgbouncer
+
+volumes:
+  pgdata:

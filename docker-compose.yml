@@ -4,14 +4,19 @@ services:
   postgres:
     image: postgres:16-alpine
     # edoburu/pgbouncer's bundled libpq doesn't speak scram-sha-256 to the
-    # backend (Postgres 16's default password hash), which fails as
-    # "server login failed: wrong password type". Forcing md5 here keeps
-    # the backend hash in a format pgbouncer can actually use.
+    # backend (Postgres 16's default), which fails as "server login
+    # failed: wrong password type". Two settings are needed together:
+    # password_encryption controls how the password is HASHED/stored,
+    # but pg_hba.conf (written by the entrypoint from
+    # POSTGRES_HOST_AUTH_METHOD, which defaults to scram-sha-256 if
+    # unset) separately controls what the server DEMANDS during the auth
+    # handshake. Both have to say md5 or the two still mismatch.
     command: ["postgres", "-c", "password_encryption=md5"]
     environment:
       POSTGRES_USER: seatapp
       POSTGRES_PASSWORD: seatapp
       POSTGRES_DB: seats
+      POSTGRES_HOST_AUTH_METHOD: md5
     ports:
       - "5432:5432"
     healthcheck:

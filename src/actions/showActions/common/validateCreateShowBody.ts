@@ -16,6 +16,9 @@ export function validateCreateShowBody(body: unknown): CreateShowBody {
   if (!seats.every((s) => typeof s === "string" && s.length > 0)) {
     throw new BadRequestError("seats must all be non-empty strings");
   }
+  if (seats.some((s) => (s as string).length > 32)) {
+    throw new BadRequestError("seat codes must be at most 32 characters");
+  }
   if (new Set(seats).size !== seats.length) {
     throw new BadRequestError("seats must not contain duplicates");
   }

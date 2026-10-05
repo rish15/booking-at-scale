@@ -73,6 +73,43 @@ async function call(
   }
 }
 
+// Raw request for hostile input (malformed bodies etc.) that call() can't express.
+async function raw(method: string, path: string, headers: Record<string, string>, body?: string): Promise<Res> {
+  try {
+    const res = await fetch(`${BASE_URL}${path}`, { method, headers, body });
+    const text = await res.text();
+    let parsed: any = text;
+    try { parsed = JSON.parse(text); } catch { /* keep text */ }
+    return { status: res.status, body: parsed };
+  } catch (err) {
+    return { status: 0, body: String(err) };
+  }
+}
+
+// Prometheus text parsing: sum of all samples of `name` whose labels contain every given pair.
+async function metricsText(): Promise<string> {
+  return String((await call("GET", "/metrics")).body);
+}
+function mval(text: string, name: string, labels: Record<string, string> = {}): number {
+  let sum = 0;
+  for (const line of text.split("\n")) {
+    if (!line.startsWith(name + "{") && !line.startsWith(name + " ")) continue;
+    if (!Object.entries(labels).every(([k, v]) => line.includes(`${k}="${v}"`))) continue;
+    sum += parseFloat(line.slice(line.lastIndexOf(" ") + 1));
+  }
+  return sum;
+}
+function sum5xx(text: string): number {
+  let sum = 0;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("http_requests_total{") && /status="5\d\d"/.test(line)) {
+      sum += parseFloat(line.slice(line.lastIndexOf(" ") + 1));
+    }
+  }
+  return sum;
+}
+const trackedShows: [string, string][] = [];
+
 const is2xx = (n: number) => n >= 200 && n < 300;
 const tok = (userId: string) => signToken(userId);
 
@@ -108,6 +145,7 @@ const fmt = (t: Record<string, number>) => Object.entries(t).map(([k, v]) => `${
 
 async function main() {
   console.log(`Target: ${BASE_URL}`);
+  const metricsAtStart = await metricsText();
 
   startSection("1. Health & metrics", "liveness, readiness (DB), prometheus endpoint");
   check("GET /healthz -> 200", (await call("GET", "/healthz")).status === 200);
@@ -198,12 +236,139 @@ async function main() {
   const stD = await call("GET", `/shows/${showD}`);
   check("exactly 1 seat confirmed (reserved once, not 30 times)", stD.body.counts.confirmed === 1, JSON.stringify(stD.body.counts));
 
-  startSection("11. Reconciliation", "available + held + confirmed == total for every show created above");
+
+  startSection("11. Malformed & hostile input", "bad IDs, bad JSON, absurd sizes: always a clean 4xx, never a 5xx");
+  const jsonH = { "Content-Type": "application/json", Authorization: `Bearer ${tok("hostile")}` };
+  const mj = await raw("POST", `/shows/${showA}/reserve`, jsonH, "{not json");
+  check("malformed JSON body -> 400", mj.status === 400, `got ${mj.status}`);
+  const nobody = await raw("POST", `/shows/${showA}/reserve`, jsonH);
+  check("empty body on reserve -> 400", nobody.status === 400, `got ${nobody.status}`);
+  const badShowId = await call("GET", "/shows/not-a-uuid");
+  check("GET /shows/not-a-uuid -> 4xx", badShowId.status >= 400 && badShowId.status < 500, `got ${badShowId.status}`);
+  const badShowRes = await reserve("not-a-uuid", "hostile", ["A1"], "h1");
+  check("reserve on /shows/not-a-uuid -> 4xx", badShowRes.status >= 400 && badShowRes.status < 500, `got ${badShowRes.status}`);
+  const badCancel = await call("POST", "/reservations/not-a-uuid/cancel", { token: tok("hostile") });
+  check("cancel /reservations/not-a-uuid -> 4xx", badCancel.status >= 400 && badCancel.status < 500, `got ${badCancel.status}`);
+  const longSeat = await reserve(showA, "hostile", ["X".repeat(10000)], "h2");
+  check("10k-char seat code -> 4xx", longSeat.status >= 400 && longSeat.status < 500, `got ${longSeat.status}`);
+  const manySeats = await reserve(showA, "hostile", Array.from({ length: 5000 }, (_, i) => `S${i}`), "h3");
+  check("5000 seats in one request -> 4xx", manySeats.status >= 400 && manySeats.status < 500, `got ${manySeats.status}`);
+  const numKey = await call("POST", `/shows/${showA}/reserve`, { token: tok("hostile"), body: { seats: ["A5"], idempotency_key: 123 } });
+  check("non-string idempotency_key -> 400", numKey.status === 400, `got ${numKey.status}`);
+  const longKey = await reserve(showA, "hostile", ["A5"], "k".repeat(10000));
+  check("10k-char idempotency_key -> 4xx", longKey.status >= 400 && longKey.status < 500, `got ${longKey.status}`);
+  const nonStr = await call("POST", `/shows/${showA}/reserve`, { token: tok("hostile"), body: { seats: [1, 2], idempotency_key: "h4" } });
+  check("non-string seat entries -> 400", nonStr.status === 400, `got ${nonStr.status}`);
+  const five = await reserve(await newShow(10), "hostile", ["A1", "A2", "A3", "A4", "A5"], "h5");
+  check("5 seats at once with limit 4 -> 409 per_user_limit", five.status === 409 && five.body.reason === "per_user_limit", JSON.stringify(five.body));
+  check("unknown route -> 404", (await call("GET", "/nope")).status === 404);
+  const createBad = async (label: string, body: unknown) => {
+    const r = await call("POST", "/shows", { admin: true, body });
+    check(`create show: ${label} -> 400`, r.status === 400, `got ${r.status}`);
+  };
+  await createBad("missing name", { seats: ["A1"], price_paise: 100 });
+  await createBad("empty seats", { name: "x", seats: [], price_paise: 100 });
+  await createBad("duplicate seats", { name: "x", seats: ["A1", "A1"], price_paise: 100 });
+  await createBad("negative price", { name: "x", seats: ["A1"], price_paise: -1 });
+  await createBad("float price", { name: "x", seats: ["A1"], price_paise: 10.5 });
+  await createBad("per_user_limit 0", { name: "x", seats: ["A1"], price_paise: 100, per_user_limit: 0 });
+  const mjShow = await raw("POST", "/shows", { "Content-Type": "application/json", "x-admin-key": ADMIN_KEY! }, "{oops");
+  check("create show: malformed JSON -> 400", mjShow.status === 400, `got ${mjShow.status}`);
+
+  startSection("12. Idempotency edge cases", "retry after a decline, replay after cancel");
+  const showE = await newShow(5);
+  trackedShows.push(["E", showE]);
+  const holder = await reserve(showE, "holder", ["A1"], "e-1");
+  const decl = await reserve(showE, "waiter", ["A1"], "e-retry");
+  check("waiter declined while seat is taken", decl.status === 409 && decl.body.reason === "seat_taken");
+  await call("POST", `/reservations/${holder.body.reservation_id}/cancel`, { token: tok("holder") });
+  const retry = await reserve(showE, "waiter", ["A1"], "e-retry");
+  check("same key retried after the seat frees up -> succeeds (a decline leaves no key behind)", is2xx(retry.status) && retry.body.status === "confirmed", JSON.stringify(retry.body));
+  const afterCancel = await reserve(showE, "holder", ["A1"], "e-1");
+  check("replaying a CANCELLED reservation's key never reports 'confirmed'", afterCancel.status < 500 && afterCancel.body.status !== "confirmed", `${afterCancel.status} ${JSON.stringify(afterCancel.body)}`);
+  check("...and does not resurrect the seat from the new owner", (await seatStatus(showE, "A1")) === "confirmed");
+
+  startSection("13. Show isolation", "same seat code in two shows is independent; limits are per show");
+  const showF = await newShow(5, 2);
+  const showG = await newShow(5, 2);
+  trackedShows.push(["F", showF], ["G", showG]);
+  check("same user, same seat code, different shows -> both succeed", is2xx((await reserve(showF, "iso", ["A1"], "f-1")).status) && is2xx((await reserve(showG, "iso", ["A1"], "g-1")).status));
+  await reserve(showF, "iso", ["A2"], "f-2");
+  const fLimit = await reserve(showF, "iso", ["A3"], "f-3");
+  check("limit reached in show F -> 409 per_user_limit", fLimit.status === 409 && fLimit.body.reason === "per_user_limit");
+  check("...but the same user can still reserve in show G", is2xx((await reserve(showG, "iso", ["A2"], "g-2")).status));
+
+  startSection("14. Cancel races", "parallel cancels; cancel racing new reservations");
+  const showH = await newShow(5);
+  trackedShows.push(["H", showH]);
+  const hr = await reserve(showH, "owner", ["A1"], "h-1");
+  const cancels = await Promise.all(Array.from({ length: 20 }, () => call("POST", `/reservations/${hr.body.reservation_id}/cancel`, { token: tok("owner") })));
+  check(`20 parallel cancels all succeed (${fmt(tally(cancels))})`, cancels.every((r) => r.status === 200 && r.body.status === "cancelled"));
+  check("seat released exactly once (available)", (await seatStatus(showH, "A1")) === "available");
+  const hr2 = await reserve(showH, "owner", ["A2"], "h-2");
+  const mix = await Promise.all([
+    call("POST", `/reservations/${hr2.body.reservation_id}/cancel`, { token: tok("owner") }),
+    ...Array.from({ length: 30 }, (_, i) => reserve(showH, `chaser${i}`, ["A2"], `c-${i}`)),
+  ]);
+  check("cancel racing 30 reservers: zero 5xx", mix.every((r) => r.status < 500), fmt(tally(mix)));
+  const winners = mix.slice(1).filter((r) => is2xx(r.status)).length;
+  check(`at most one reserver wins A2 (${winners})`, winners <= 1);
+  check("final A2 state is consistent with the outcome", (await seatStatus(showH, "A2")) === (winners === 1 ? "confirmed" : "available"));
+
+  startSection("15. Multi-seat overlap (deadlock check)", "60 users request random overlapping pairs in random order, all at once");
+  const showI = await newShow(6, 6);
+  trackedShows.push(["I", showI]);
+  const pick = () => {
+    const a = Math.floor(Math.random() * 6) + 1;
+    let b = Math.floor(Math.random() * 6) + 1;
+    while (b === a) b = Math.floor(Math.random() * 6) + 1;
+    return [`A${a}`, `A${b}`];
+  };
+  const overlap = await Promise.all(Array.from({ length: 60 }, (_, i) => reserve(showI, `pairer${i}`, pick(), `p-${i}`)));
+  const ot = tally(overlap);
+  check(`zero 5xx / no deadlocks (${fmt(ot)})`, overlap.every((r) => r.status < 500));
+  const won = overlap.filter((r) => is2xx(r.status)).length;
+  const stI = await call("GET", `/shows/${showI}`);
+  check(`confirmed seats == 2 x winning requests (${stI.body.counts.confirmed} == ${won * 2})`, stI.body.counts.confirmed === won * 2);
+
+  startSection("16. Metrics", "counters move by exactly the right amounts (run against an otherwise idle server)");
+  const showM = await newShow(3, 2);
+  trackedShows.push(["M", showM]);
+  const before = await metricsText();
+  await reserve(showM, "m1", ["A1"], "m-a");              // +1 confirmed (201)
+  await reserve(showM, "m1", ["A1"], "m-a");              // replay: no metric change in reservation counters
+  await reserve(showM, "m2", ["A1"], "m-b");              // +1 declined seat_taken (409)
+  await reserve(showM, "m1", ["A2", "A3"], "m-c");        // +1 declined per_user_limit (409)
+  await reserve(showM, "m1", ["A2"], "m-a");              // +1 declined idempotent_conflict (409)
+  const afterM = await metricsText();
+  const d = (name: string, l: Record<string, string> = {}) => mval(afterM, name, l) - mval(before, name, l);
+  check("reservations_confirmed_total +1 (replay not double counted)", d("reservations_confirmed_total") === 1, `delta ${d("reservations_confirmed_total")}`);
+  check("declined{seat_taken} +1", d("reservations_declined_total", { reason: "seat_taken" }) === 1);
+  check("declined{per_user_limit} +1", d("reservations_declined_total", { reason: "per_user_limit" }) === 1);
+  check("declined{idempotent_conflict} +1", d("reservations_declined_total", { reason: "idempotent_conflict" }) === 1);
+  const rt = { route: "/shows/:id/reserve" };
+  check("http_requests_total{reserve,201} +2 (new + replay)", d("http_requests_total", { ...rt, status: "201" }) === 2, `delta ${d("http_requests_total", { ...rt, status: "201" })}`);
+  check("http_requests_total{reserve,409} +3", d("http_requests_total", { ...rt, status: "409" }) === 3);
+  await call("GET", `/shows/${showM}`);
+  const gauge = mval(await metricsText(), "seats_available", { show_id: showM });
+  check(`seats_available gauge matches DB (${gauge} == 2)`, gauge === 2);
+  check("latency histogram exported for the reserve route", mval(afterM, "http_request_duration_seconds_count", rt) > 0);
+
+  startSection("17. Reconciliation", "available + held + confirmed == total for every show created above");
   for (const [label, id] of [["A", showA], ["B", showB], ["C", showC], ["D", showD]] as const) {
     const s = await call("GET", `/shows/${id}`);
     const c = s.body.counts;
     check(`show ${label}: ${c.available}+${c.held}+${c.confirmed} == ${c.total}`, c.available + c.held + c.confirmed === c.total);
   }
+  for (const [label, id] of trackedShows) {
+    const c = (await call("GET", `/shows/${id}`)).body.counts;
+    check(`show ${label}: ${c.available}+${c.held}+${c.confirmed} == ${c.total}`, c.available + c.held + c.confirmed === c.total);
+  }
+
+  startSection("18. Server-side view", "the server's own 5xx counter for this whole run");
+  const metricsAtEnd = await metricsText();
+  const new5xx = sum5xx(metricsAtEnd) - sum5xx(metricsAtStart);
+  check(`server recorded ${new5xx} 5xx responses during the run`, new5xx === 0);
 
   // ---------- report ----------
   const failed = results.filter((r) => !r.ok);

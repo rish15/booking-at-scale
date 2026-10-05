@@ -39,6 +39,16 @@ export function mapErrorToResponse(err: unknown): ErrorResponse {
   if (err instanceof OverloadedError) {
     return { status: 429, body: { type: "error", message: err.message } };
   }
+  // Fastify's own client errors (malformed JSON, empty body, payload too
+  // large...) carry a 4xx statusCode. They are the client's fault, so they
+  // must surface as 4xx — never fall through to the generic 500 below.
+  const clientStatus = (err as { statusCode?: unknown } | null)?.statusCode;
+  if (typeof clientStatus === "number" && clientStatus >= 400 && clientStatus < 500) {
+    return {
+      status: clientStatus,
+      body: { type: "error", message: (err as Error).message || "Bad request" },
+    };
+  }
   const error = err instanceof Error ? err : new Error(String(err));
   // eslint-disable-next-line no-console
   console.error("Unhandled error:", error);

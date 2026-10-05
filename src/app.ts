@@ -11,6 +11,20 @@ app.addHook("onRequest", async (_req, reply) => {
   reply.header("Access-Control-Allow-Origin", "*");
 });
 
+// Tolerate an empty body when Content-Type is application/json (a plain
+// POST like /reservations/:id/cancel has nothing to send). Fastify's default
+// parser rejects that; malformed JSON still becomes a clean 400.
+app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+  if (!body || body === "") return done(null, undefined);
+  try {
+    done(null, JSON.parse(body as string));
+  } catch {
+    const err = new Error("Malformed JSON body") as Error & { statusCode: number };
+    err.statusCode = 400;
+    done(err, undefined);
+  }
+});
+
 registerApiLogger(app);
 // User auth (requireUserAuth) and admin auth (requireAdmin) are applied
 // per-route in routes/ — see the comment at the top of middlewares/auth.ts

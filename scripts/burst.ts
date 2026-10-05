@@ -25,6 +25,13 @@ if (!ADMIN_KEY || !AUTH_TOKEN_SECRET) {
   process.exit(1);
 }
 
+// First few 5xx / network failures, kept verbatim so the report can show WHO
+// produced them (the app, or a proxy in front of it) instead of just a count.
+const failureSamples: string[] = [];
+function recordSample(text: string) {
+  if (failureSamples.length < 3) failureSamples.push(text);
+}
+
 interface Outcome {
   status: number;
   reason?: string;
@@ -64,8 +71,17 @@ async function reserve(
       const body = (await res.json()) as { reason?: string };
       return { status: 409, reason: body.reason };
     }
+    if (res.status >= 500) {
+      const h = (n: string) => res.headers.get(n) ?? "-";
+      const text = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 200);
+      recordSample(
+        `HTTP ${res.status} server=${h("server")} cf-ray=${h("cf-ray")} x-render-routing=${h("x-render-routing")} body="${text}"`
+      );
+    }
     return { status: res.status };
-  } catch {
+  } catch (err) {
+    const e = err as { message?: string; cause?: { code?: string; message?: string } };
+    recordSample(`network error: ${e.message} cause=${e.cause?.code ?? e.cause?.message ?? "-"}`);
     return { status: 0 }; // network-level failure — counted separately below
   }
 }
@@ -138,6 +154,10 @@ async function main() {
   );
 
   const fiveXx = outcomes.filter((o) => o.status >= 500).length;
+  if (failureSamples.length) {
+    console.log("\n--- Sample failures (who produced them) ---");
+    for (const f of failureSamples) console.log(`  ${f}`);
+  }
   console.log(`\n5xx count: ${fiveXx} ${fiveXx === 0 ? "(zero 5xx — pass)" : "(FAIL)"}`);
 }
 

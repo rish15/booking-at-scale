@@ -4,6 +4,7 @@
 // of a cancel call must not surface as a failure.
 
 import { withTransaction } from "../../db/pool";
+import { isUuid } from "../common/isUuid";
 import { NotAuthorizedError, ResourceNotFoundError } from "../../errors";
 
 export interface CancelResult {
@@ -15,6 +16,9 @@ export async function cancelReservation(
   reservationId: string,
   userId: string
 ): Promise<CancelResult> {
+  if (!isUuid(reservationId)) {
+    throw new ResourceNotFoundError("reservation", { reservationId });
+  }
   return withTransaction(async (client) => {
     const resRow = await client.query(
       `SELECT id, show_id, user_id, status FROM reservations WHERE id = $1`,

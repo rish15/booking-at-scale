@@ -1,4 +1,5 @@
 import { pool } from "../../db/pool";
+import { isUuid } from "../common/isUuid";
 import { ResourceNotFoundError } from "../../errors";
 import { seatsAvailableGauge } from "../../metrics/metrics";
 import { SeatStatus } from "../../types";
@@ -13,6 +14,9 @@ export interface GetShowResult {
 }
 
 export async function getShow(showId: string): Promise<GetShowResult> {
+  if (!isUuid(showId)) {
+    throw new ResourceNotFoundError("show", { showId });
+  }
   const showRes = await pool.query(
     `SELECT id, name, price_paise, per_user_limit FROM shows WHERE id = $1`,
     [showId]

@@ -6,6 +6,7 @@
 // of that design, not a simplification of it.
 
 import { withTransaction } from "../../db/pool";
+import { isUuid } from "../common/isUuid";
 import { ResourceNotFoundError, ReservationDeclinedError } from "../../errors";
 import { hashReserveRequest } from "./common/hashRequest";
 import { validateReserveBody } from "./common/validateReserveBody";
@@ -17,7 +18,7 @@ export interface ReserveSeatsResult {
   user_id: string;
   seats: string[];
   amount_paise: number;
-  status: "confirmed";
+  status: "confirmed" | "cancelled";
 }
 
 export async function reserveSeats(
@@ -25,12 +26,18 @@ export async function reserveSeats(
   userId: string,
   rawBody: unknown
 ): Promise<ReserveSeatsResult> {
+  if (!isUuid(showId)) {
+    throw new ResourceNotFoundError("show", { showId });
+  }
   const { seats, idempotency_key } = validateReserveBody(rawBody);
   const requestHash = hashReserveRequest(seats);
   const sortedSeats = [...seats].sort(); // deadlock avoidance — always lock in the same order
 
+  // Counted only AFTER commit: incrementing inside the transaction would
+  // over-count if COMMIT itself fails or the transaction is rolled back.
+  let newlyConfirmed = false;
   try {
-    return await withTransaction(async (client) => {
+    const result = await withTransaction(async (client) => {
       // 0. Show must exist; grab price + per-user limit for this show.
       const showRes = await client.query(
         `SELECT price_paise, per_user_limit FROM shows WHERE id = $1`,
@@ -68,8 +75,10 @@ export async function reserveSeats(
             "idempotency_key reused with a different request body"
           );
         }
-        // Same request, replayed — return the original outcome, don't
-        // touch any seats again.
+        // Same request, replayed — return the original reservation, don't
+        // touch any seats again. Its status is reported as it is NOW: if the
+        // user cancelled it since, replaying must say "cancelled", not claim
+        // a seat that may already belong to someone else.
         const seatRows = await client.query(
           `SELECT seat_code FROM reservation_seats WHERE reservation_id = $1 ORDER BY seat_code`,
           [row.id]
@@ -80,7 +89,7 @@ export async function reserveSeats(
           user_id: userId,
           seats: seatRows.rows.map((r) => r.seat_code),
           amount_paise: row.amount_paise,
-          status: "confirmed" as const,
+          status: row.status as "confirmed" | "cancelled",
         };
       }
 
@@ -148,7 +157,7 @@ export async function reserveSeats(
         );
       }
 
-      reservationsConfirmedTotal.inc();
+      newlyConfirmed = true;
 
       return {
         reservation_id: reservationId,
@@ -159,6 +168,8 @@ export async function reserveSeats(
         status: "confirmed" as const,
       };
     });
+    if (newlyConfirmed) reservationsConfirmedTotal.inc();
+    return result;
   } catch (err) {
     if (err instanceof ReservationDeclinedError && err.reason === "idempotent_conflict") {
       reservationsDeclinedTotal.inc({ reason: "idempotent_conflict" });

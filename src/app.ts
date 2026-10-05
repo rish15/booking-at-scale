@@ -2,9 +2,19 @@ import Fastify from "fastify";
 import { config } from "./config/config";
 import { Routes } from "./routes";
 import { registerApiLogger } from "./middlewares/apiLogger";
+import { registerLoadShedder } from "./middlewares/loadShedder";
 import { mapErrorToResponse } from "./errors/mapErrorToResponse";
 
-const app = Fastify({ logger: false }); // apiLogger hook does our own structured logging
+const app = Fastify({
+  logger: false, // apiLogger hook does our own structured logging
+  // Platform proxies (Render, most load balancers) hold idle upstream
+  // connections open for up to ~60s. If Node closes an idle keep-alive
+  // socket first (default 5s), the proxy can reuse a dead connection and
+  // answer 502. Keep ours open longer than the proxy's.
+  keepAliveTimeout: 65_000,
+});
+// Node requires headersTimeout > keepAliveTimeout.
+app.server.headersTimeout = 66_000;
 
 // CORS — minimal, no extra dependency needed for a JSON API with no browser UI.
 app.addHook("onRequest", async (_req, reply) => {
@@ -26,6 +36,7 @@ app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body,
 });
 
 registerApiLogger(app);
+registerLoadShedder(app); // after the logger so shed responses are still logged/counted
 // User auth (requireUserAuth) and admin auth (requireAdmin) are applied
 // per-route in routes/ — see the comment at the top of middlewares/auth.ts
 // for why this isn't a single global hook.

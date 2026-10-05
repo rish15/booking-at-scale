@@ -85,6 +85,7 @@ function tally(outcomes: Outcome[]) {
     else if (o.status >= 500) key = `5xx (${o.status})`;
     else if (o.status === 201) key = "confirmed";
     else if (o.status === 409) key = `declined:${o.reason || "unknown"}`;
+    else if (o.status === 429) key = "shed:overloaded (429, retryable - server backpressure)";
     else key = `other (${o.status})`;
     summary[key] = (summary[key] || 0) + 1;
   }

@@ -15,6 +15,11 @@ export function translatePgError(err: unknown): Error {
   if (code && TIMEOUT_SQLSTATES.has(code)) {
     return new OverloadedError();
   }
+  // node-postgres rejects pool.connect()/pool.query() with this message
+  // (no SQLSTATE) when no connection frees up within connectionTimeoutMillis.
+  if (err instanceof Error && err.message === "timeout exceeded when trying to connect") {
+    return new OverloadedError();
+  }
   // 22P02 invalid_text_representation (e.g. an uncastable uuid): the
   // client sent something unparseable. Safety net behind the explicit id
   // checks in the actions — must be a 4xx, never a 500.

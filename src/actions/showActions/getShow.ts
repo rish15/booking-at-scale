@@ -1,4 +1,5 @@
 import { pool } from "../../db/pool";
+import { translatePgError } from "../../db/pgErrors";
 import { isUuid } from "../common/isUuid";
 import { ResourceNotFoundError } from "../../errors";
 import { seatsAvailableGauge } from "../../metrics/metrics";
@@ -14,6 +15,14 @@ export interface GetShowResult {
 }
 
 export async function getShow(showId: string): Promise<GetShowResult> {
+  try {
+    return await loadShow(showId);
+  } catch (err) {
+    throw translatePgError(err);
+  }
+}
+
+async function loadShow(showId: string): Promise<GetShowResult> {
   if (!isUuid(showId)) {
     throw new ResourceNotFoundError("show", { showId });
   }

@@ -31,6 +31,9 @@ function useSsl(): boolean {
 export const pool = new Pool({
   connectionString: config.databaseUrl,
   max: config.db.poolMax,
+  // Waiting for a free connection longer than this means we are saturated:
+  // fail fast (translated to 429) rather than queue indefinitely.
+  connectionTimeoutMillis: config.db.connectionTimeoutMs,
   ssl: useSsl() ? { rejectUnauthorized: false } : undefined,
 });
 
@@ -80,7 +83,13 @@ export async function checkDbConnection(): Promise<boolean> {
 export async function withTransaction<T>(
   fn: (client: PoolClient) => Promise<T>
 ): Promise<T> {
-  const client = await pool.connect();
+  let client: PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (err) {
+    // Pool exhausted past connectionTimeoutMillis -> 429, not a bare 500.
+    throw translatePgError(err);
+  }
   try {
     await client.query("BEGIN");
     const result = await fn(client);

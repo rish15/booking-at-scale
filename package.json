@@ -14,7 +14,8 @@
     "db:migrate:build": "node dist/src/db/migrate.js",
     "token": "ts-node scripts/make-token.ts",
     "lint": "eslint \"src/**/*.ts\"",
-    "burst": "ts-node scripts/burst.ts"
+    "burst": "ts-node scripts/burst.ts",
+    "e2e": "ts-node scripts/e2e.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

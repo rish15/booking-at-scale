@@ -46,3 +46,17 @@ export const httpRequestDurationSeconds = new client.Histogram({
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
   registers: [registry],
 });
+
+// Backpressure visibility: how many requests are being worked on right now,
+// and how many were turned away with 429 because the cap was reached.
+export const httpInflightGauge = new client.Gauge({
+  name: "http_inflight_requests",
+  help: "Requests currently being processed",
+  registers: [registry],
+});
+
+export const httpRequestsShedTotal = new client.Counter({
+  name: "http_requests_shed_total",
+  help: "Requests rejected with 429 because the in-flight cap was reached",
+  registers: [registry],
+});

@@ -33,11 +33,16 @@ export const config = {
   adminKey: required("ADMIN_KEY"),
 
   perUserLimit: int("PER_USER_LIMIT", 4),
+  // Backpressure: max requests being worked on at once. Beyond this the
+  // server answers 429 immediately instead of queueing unboundedly in
+  // memory (see middlewares/loadShedder.ts).
+  maxInflightRequests: int("MAX_INFLIGHT_REQUESTS", 256),
   holdExpirySeconds: int("HOLD_EXPIRY_SECONDS", 60),
 
   db: {
     statementTimeoutMs: int("DB_STATEMENT_TIMEOUT_MS", 5000),
     lockTimeoutMs: int("DB_LOCK_TIMEOUT_MS", 3000),
     poolMax: int("DB_POOL_MAX", 15),
+    connectionTimeoutMs: int("DB_CONNECTION_TIMEOUT_MS", 3000),
   },
 };

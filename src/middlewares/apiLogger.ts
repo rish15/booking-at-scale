@@ -4,6 +4,7 @@
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import crypto from "crypto";
+import { httpRequestsTotal, httpRequestDurationSeconds } from "../metrics/metrics";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -22,6 +23,9 @@ export function registerApiLogger(app: FastifyInstance): void {
 
   app.addHook("onResponse", async (req: FastifyRequest, reply: FastifyReply) => {
     const elapsedMs = Number(process.hrtime.bigint() - req.startTimeNs) / 1e6;
+    const route = req.routeOptions?.url || "unmatched";
+    httpRequestsTotal.inc({ method: req.method, route, status: String(reply.statusCode) });
+    httpRequestDurationSeconds.observe({ method: req.method, route }, elapsedMs / 1000);
     const logData = {
       requestId: req.requestId,
       method: req.method,

@@ -27,3 +27,22 @@ export const seatsAvailableGauge = new client.Gauge({
   labelNames: ["show_id"] as const,
   registers: [registry],
 });
+
+// HTTP-level metrics: the 5xx rate is the headline alert for this service
+// ("zero 5xx" is the bar), so it has to be directly observable. `route` is
+// the route PATTERN (/shows/:id/reserve), never the raw URL, to keep label
+// cardinality bounded.
+export const httpRequestsTotal = new client.Counter({
+  name: "http_requests_total",
+  help: "HTTP responses by method, route pattern and status code",
+  labelNames: ["method", "route", "status"] as const,
+  registers: [registry],
+});
+
+export const httpRequestDurationSeconds = new client.Histogram({
+  name: "http_request_duration_seconds",
+  help: "HTTP request latency by method and route pattern",
+  labelNames: ["method", "route"] as const,
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
